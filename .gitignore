@@ -170,6 +170,8 @@ output_video/
 input_video/
 
 runs/
+## 模型参数
+*.pt
 # 压缩文件
 *.zip
 *.tar.gz
