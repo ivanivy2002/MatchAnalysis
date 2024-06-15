@@ -165,7 +165,24 @@ cython_debug/
 # 本项目
 models/
 training/datasets/
+training/runs/
 output_video/
 input_video/
 
-
+runs/
+# 压缩文件
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.lz
+*.tar.lz4
+*.tar.7z
+*.tar
+*.gz
+*.bz2
+*.xz
+*.lz
+*.lz4
+*.7z
+*.rar
