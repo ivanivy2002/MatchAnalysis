@@ -27,3 +27,16 @@ def avg_digit_fontsize(
     average_width = sum(widths) / len(widths)
     average_height = sum(heights) / len(heights)
     return average_width, average_height
+
+
+
+def measure_distance(p1, p2):
+    x1, y1 = p1
+    x2, y2 = p2
+    return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+
+def distance_feet_point(bbox, point):
+    dist1 = measure_distance(point, (bbox[0], bbox[-1]))
+    dist2 = measure_distance(point, (bbox[2], bbox[-1]))
+    dist = min(dist1, dist2)
+    return dist

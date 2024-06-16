@@ -3,9 +3,11 @@ import pickle
 import cv2
 import numpy as np
 import pandas as pd
+from PIL import ImageFont, ImageDraw, Image
 from tqdm import tqdm
 import supervision as sv
 import sys
+import os
 
 sys.path.append("../")
 from utils import get_center, get_width, avg_digit_fontsize
@@ -23,7 +25,20 @@ class Tracker:
         self.avg_digit_width, self.avg_digit_height = avg_digit_fontsize(
             font, fontScale, thickness
         )
+        self.team_colors = {}
 
+    def put_chinese_text(self, image, text, position, font_path, font_size, color):
+        # Convert image to RGB (OpenCV uses BGR by default)
+        image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(image_pil)
+        # Load font
+        font = ImageFont.truetype(font_path, font_size)
+        # Draw text
+        draw.text(position, text, font=font, fill=color)
+        # Convert image back to BGR
+        return cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+
+    
     # 检测帧
     def detect_frames(self, frames):
         batch_size = 20
@@ -37,7 +52,7 @@ class Tracker:
 
     # 获取目标轨迹
     def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
-        if read_from_stub and stub_path is not None:
+        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
             with open(stub_path, "rb") as f:
                 return pickle.load(f)
         detections = self.detect_frames(frames)
@@ -49,7 +64,9 @@ class Tracker:
             "ball": [],
         }
         for frame_num, detection in enumerate(detections):
-            cls_names = detection.names  # {0: ball, 1: goalkeeper, 2: player, 3: referee}
+            cls_names = (
+                detection.names
+            )  # {0: ball, 1: goalkeeper, 2: player, 3: referee}
             cls_names_inv = {cls_name: i for i, cls_name in (cls_names.items())}
             # 转为supervision Detection Format
             detection_supervision = sv.Detections.from_ultralytics(detection)
@@ -77,12 +94,18 @@ class Tracker:
                     tracks["players"][frame_num][track_id] = {"bbox": bbox}
                 if cls_id == cls_names_inv["referee"]:
                     tracks["referees"][frame_num][track_id] = {"bbox": bbox}
-
+            ball_cnt = 0
             for frame_detection in detection_with_tracks:
                 bbox = frame_detection[0].tolist()
                 cls_id = frame_detection[3]
+                track_id = frame_detection[4]
                 if cls_id == cls_names_inv["ball"]:
+                    ball_cnt += 1
+                    if ball_cnt > 1:
+                        print(f"Frame {frame_num} has more than one ball!")
+                        print(f"Ball {ball_cnt} bbox: {bbox}")
                     tracks["ball"][frame_num][1] = {"bbox": bbox}  # 只有一个球
+                    # tracks["ball"][frame_num][track_id] = {"bbox": bbox}  # 所有球？
         if stub_path is not None:
             with open(stub_path, "wb") as f:
                 pickle.dump(tracks, f)
@@ -159,7 +182,7 @@ class Tracker:
 
         return frame
 
-    def draw_annotation(self, frames, tracks):
+    def draw_annotation(self, frames, tracks, team_control):
         output_frames = []
         # for frame_num, frame in enumerate(tqdm(frames, desc="Drawing Annotation")):
         for frame_num, frame in enumerate(frames):
@@ -173,23 +196,107 @@ class Tracker:
                 frame = self.draw_ellipse(
                     frame, player["bbox"], color=color, track_id=track_id
                 )
+                # 如果控球，画红色三角
+                if player.get("has_ball", False):
+                    frame = self.draw_triangle(
+                        frame, player["bbox"], color=(245, 10, 10)
+                    )
             # 画 referee
             for _, referee in referee_dict.items():
                 frame = self.draw_ellipse(frame, referee["bbox"], color=(10, 245, 245))
-            # 画 ball
+            # 画 ball，蓝色三角
             for track_id, ball in ball_dict.items():
-                frame = self.draw_triangle(frame, ball["bbox"], color=(10, 245, 10))
+                frame = self.draw_triangle(frame, ball["bbox"], color=(10, 10, 245))
 
+            frame = self.draw_team_ball_control(frame, frame_num, team_control)
             output_frames.append(frame)
+
         return output_frames
 
-    def interpolate_ball(self, ball_postions):
-        ball_pos = [x.get(1, {}).get("bbox", []) for x in ball_postions]
+    def interpolate_ball(self, ball_positions):
+        ball_pos = [
+            x.get(1, {}).get("bbox", [np.nan, np.nan, np.nan, np.nan])
+            for x in ball_positions
+        ]
+
+        # 创建DataFrame时处理空值
         df_ball_pos = pd.DataFrame(ball_pos, columns=["x1", "y1", "x2", "y2"])
-        # 插值
-        df_ball_pos = df_ball_pos.interpolate()
-        df_ball_pos.bfill()
 
-        ball_postions = [{1: {"bbox": x}} for x in df_ball_pos.to_numpy().tolist()]
+        # 插值并向后填充
+        df_ball_pos = df_ball_pos.interpolate().bfill().ffill()
+        # 确保所有的 NaN 值都被填充
+        df_ball_pos = df_ball_pos.fillna(method="bfill").fillna(method="ffill")
+        df_ball_pos = df_ball_pos.fillna(0)  # 这是一个保险措施，以防还有未被处理的 NaN
+        # 将插值后的数据转换回原始格式
+        ball_positions = [{1: {"bbox": x}} for x in df_ball_pos.to_numpy().tolist()]
 
-        return ball_postions
+        return ball_positions
+
+    def interpolate_ball_plus(self, ball_positions):
+        # 如果每一帧中只有一个球，使用原来的逻辑
+        if all(len(frame_balls) <= 1 for frame_balls in ball_positions):
+            ball_pos = [x.get(1, {}).get("bbox", []) for x in ball_positions]
+            df_ball_pos = pd.DataFrame(ball_pos, columns=["x1", "y1", "x2", "y2"])
+            # 插值
+            df_ball_pos = df_ball_pos.interpolate().bfill()
+            ball_positions = [{1: {"bbox": x}} for x in df_ball_pos.to_numpy().tolist()]
+        else:
+            # 处理每一帧中可能有多个球的情况
+            all_balls_pos = []
+            for frame_balls in ball_positions:
+                frame_ball_positions = []
+                for track_id, ball in frame_balls.items():
+                    frame_ball_positions.append(ball.get("bbox", []))
+                all_balls_pos.append(frame_ball_positions)
+
+            # 确保所有帧都有相同数量的球（填充空值）
+            max_balls = max(len(balls) for balls in all_balls_pos)
+            for balls in all_balls_pos:
+                while len(balls) < max_balls:
+                    balls.append([np.nan, np.nan, np.nan, np.nan])
+
+            # 将球的位置转换为DataFrame并插值
+            ball_dfs = []
+            for i in range(max_balls):
+                single_ball_pos = [balls[i] for balls in all_balls_pos]
+                df_single_ball_pos = pd.DataFrame(
+                    single_ball_pos, columns=["x1", "y1", "x2", "y2"]
+                )
+                df_single_ball_pos = df_single_ball_pos.interpolate().bfill()
+                ball_dfs.append(df_single_ball_pos)
+
+            # 合并所有球的位置
+            interpolated_positions = []
+            for row in zip(*[df.to_numpy().tolist() for df in ball_dfs]):
+                frame_balls = {i + 1: {"bbox": ball} for i, ball in enumerate(row)}
+                interpolated_positions.append(frame_balls)
+
+            ball_positions = interpolated_positions
+
+        return ball_positions
+
+    def draw_team_ball_control(self, frame, frame_num, team_control):
+        team_control = np.array(team_control)
+        # 绘画透明矩形
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (1350, 850), (1900, 965), (255, 255, 255), -1)
+        alpha = 0.37
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+        team_control_till_frame = team_control[: frame_num + 1]
+        team_1 = team_control_till_frame[team_control_till_frame==1].shape[0]
+        team_2 = team_control_till_frame[team_control_till_frame==2].shape[0]
+        total = team_1 + team_2
+        team_1_percent = team_1 / total if total != 0 else 0
+        team_2_percent = team_2 / total if total != 0 else 0
+
+        team_1_color = (int(self.team_colors[1][0]), int(self.team_colors[1][1]), int(self.team_colors[1][2]))
+        cv2.rectangle(frame, (1370, 880), (1390, 900), team_1_color, -1)
+        cv2.putText(frame, f"队 1 控球率: {team_1_percent:.2%}", (1400, 900), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
+        # frame = self.put_chinese_text(frame, f"队 1 控球率: {team_1_percent:.2%}", (1400, 900), "font/simsunb.ttf", 30, (0, 0, 0))
+
+        team_2_color = (int(self.team_colors[2][0]), int(self.team_colors[2][1]), int(self.team_colors[2][2]))
+        cv2.rectangle(frame, (1370, 930), (1390, 950), team_2_color, -1)
+        cv2.putText(frame, f"队 2 控球率: {team_2_percent:.2%}", (1400, 950), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
+        # frame = self.put_chinese_text(frame, f"队 2 控球率: {team_2_percent:.2%}", (1400, 950), "font/simsunb.ttf", 30, (0, 0, 0))
+        return frame
