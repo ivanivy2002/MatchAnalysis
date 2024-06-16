@@ -1,8 +1,9 @@
+from ultralytics import YOLO
 import pickle
 import cv2
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
-from ultralytics import YOLO
 import supervision as sv
 import sys
 
@@ -42,13 +43,13 @@ class Tracker:
         detections = self.detect_frames(frames)
 
         tracks = {
-            "ball": [],
-            "player": [],
+            "players": [],
             # "goalkeeper": [],
-            "referee": [],
+            "referees": [],
+            "ball": [],
         }
         for frame_num, detection in enumerate(detections):
-            cls_names = detection.names  # {0:ball, 2:player, 1:goalkeeper, 3:referee}
+            cls_names = detection.names  # {0: ball, 1: goalkeeper, 2: player, 3: referee}
             cls_names_inv = {cls_name: i for i, cls_name in (cls_names.items())}
             # 转为supervision Detection Format
             detection_supervision = sv.Detections.from_ultralytics(detection)
@@ -65,22 +66,21 @@ class Tracker:
             )
             # print(f'***************Detect+Tracks Frame={frame_num}***************')
             # print(detection_with_tracks)
-            tracks["player"].append({})
+            tracks["players"].append({})
+            tracks["referees"].append({})
             tracks["ball"].append({})
-            tracks["referee"].append({})
             for frame_detection in detection_with_tracks:
                 bbox = frame_detection[0].tolist()
                 cls_id = frame_detection[3]
                 track_id = frame_detection[4]
                 if cls_id == cls_names_inv["player"]:
-                    tracks["player"][frame_num][track_id] = {"bbox": bbox}
+                    tracks["players"][frame_num][track_id] = {"bbox": bbox}
                 if cls_id == cls_names_inv["referee"]:
-                    tracks["referee"][frame_num][track_id] = {"bbox": bbox}
+                    tracks["referees"][frame_num][track_id] = {"bbox": bbox}
 
             for frame_detection in detection_with_tracks:
                 bbox = frame_detection[0].tolist()
                 cls_id = frame_detection[3]
-                track_id = frame_detection[4]
                 if cls_id == cls_names_inv["ball"]:
                     tracks["ball"][frame_num][1] = {"bbox": bbox}  # 只有一个球
         if stub_path is not None:
@@ -138,7 +138,7 @@ class Tracker:
     def draw_triangle(self, frame, bbox, color):
         y1 = bbox[1]
         x_center, _ = get_center(bbox)
-        width = get_width(bbox)
+
         triangle_width = 20  # 0.5 * width
         triangle_height = 2 * triangle_width
         triangle_points = np.array(
@@ -164,13 +164,14 @@ class Tracker:
         # for frame_num, frame in enumerate(tqdm(frames, desc="Drawing Annotation")):
         for frame_num, frame in enumerate(frames):
             frame = frame.copy()
-            player_dict = tracks["player"][frame_num]
+            player_dict = tracks["players"][frame_num]
             ball_dict = tracks["ball"][frame_num]
-            referee_dict = tracks["referee"][frame_num]
+            referee_dict = tracks["referees"][frame_num]
             # 画 player
             for track_id, player in player_dict.items():
+                color = player.get("team_color", (10, 10, 245))
                 frame = self.draw_ellipse(
-                    frame, player["bbox"], color=(10, 10, 245), track_id=track_id
+                    frame, player["bbox"], color=color, track_id=track_id
                 )
             # 画 referee
             for _, referee in referee_dict.items():
@@ -181,3 +182,14 @@ class Tracker:
 
             output_frames.append(frame)
         return output_frames
+
+    def interpolate_ball(self, ball_postions):
+        ball_pos = [x.get(1, {}).get("bbox", []) for x in ball_postions]
+        df_ball_pos = pd.DataFrame(ball_pos, columns=["x1", "y1", "x2", "y2"])
+        # 插值
+        df_ball_pos = df_ball_pos.interpolate()
+        df_ball_pos.bfill()
+
+        ball_postions = [{1: {"bbox": x}} for x in df_ball_pos.to_numpy().tolist()]
+
+        return ball_postions
