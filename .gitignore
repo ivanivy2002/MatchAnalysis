@@ -165,6 +165,7 @@ cython_debug/
 # 本项目
 models/
 training/datasets/
+training/annotated/
 training/runs/
 output_video/
 input_video/
