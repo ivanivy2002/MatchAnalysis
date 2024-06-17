@@ -9,6 +9,8 @@ import supervision as sv
 import sys
 import os
 
+from utils import measure_distance
+
 sys.path.append("../")
 from utils import get_center, get_width, avg_digit_fontsize
 
@@ -38,7 +40,6 @@ class Tracker:
         # Convert image back to BGR
         return cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
 
-    
     # 检测帧
     def detect_frames(self, frames):
         batch_size = 20
@@ -59,15 +60,13 @@ class Tracker:
 
         tracks = {
             "players": [],
-            # "goalkeeper": [],
             "referees": [],
             "ball": [],
         }
         for frame_num, detection in enumerate(detections):
-            cls_names = (
-                detection.names
-            )  # {0: ball, 1: goalkeeper, 2: player, 3: referee}
-            cls_names_inv = {cls_name: i for i, cls_name in (cls_names.items())}
+            cls_names = detection.names
+            # {0: ball, 1: goalkeeper, 2: player, 3: referee}
+            cls_names_inv = {cls_name: i for i, cls_name in cls_names.items()}
             # 转为supervision Detection Format
             detection_supervision = sv.Detections.from_ultralytics(detection)
 
@@ -94,16 +93,18 @@ class Tracker:
                     tracks["players"][frame_num][track_id] = {"bbox": bbox}
                 if cls_id == cls_names_inv["referee"]:
                     tracks["referees"][frame_num][track_id] = {"bbox": bbox}
-            ball_cnt = 0
-            for frame_detection in detection_with_tracks:
+            # ball_cnt = 0
+            for (
+                frame_detection
+            ) in detection_supervision:  # 为什么这里不用detection_with_tracks
                 bbox = frame_detection[0].tolist()
                 cls_id = frame_detection[3]
-                track_id = frame_detection[4]
+                # track_id = frame_detection[4]
                 if cls_id == cls_names_inv["ball"]:
-                    ball_cnt += 1
-                    if ball_cnt > 1:
-                        print(f"Frame {frame_num} has more than one ball!")
-                        print(f"Ball {ball_cnt} bbox: {bbox}")
+                    # ball_cnt += 1
+                    # if ball_cnt > 1:
+                    #     print(f"Frame {frame_num} has more than one ball!")
+                    #     print(f"Ball {ball_cnt} bbox: {bbox}")
                     tracks["ball"][frame_num][1] = {"bbox": bbox}  # 只有一个球
                     # tracks["ball"][frame_num][track_id] = {"bbox": bbox}  # 所有球？
         if stub_path is not None:
@@ -159,18 +160,17 @@ class Tracker:
         return frame
 
     def draw_triangle(self, frame, bbox, color):
-        y1 = bbox[1]
+        y1 = int(bbox[1])
         x_center, _ = get_center(bbox)
 
-        triangle_width = 20  # 0.5 * width
-        triangle_height = 2 * triangle_width
+        triangle_width = 10  # 0.5 * width
+        triangle_height = 20
         triangle_points = np.array(
             [
                 [x_center, y1],
-                [x_center - triangle_width / 2, y1 - triangle_height],
-                [x_center + triangle_width / 2, y1 - triangle_height],
-            ],
-            dtype=int,
+                [x_center - 10, y1 - triangle_height],
+                [x_center + 10, y1 - triangle_height],
+            ]
         )
 
         cv2.drawContours(
@@ -204,7 +204,7 @@ class Tracker:
             # 画 referee
             for _, referee in referee_dict.items():
                 frame = self.draw_ellipse(frame, referee["bbox"], color=(10, 245, 245))
-            # 画 ball，蓝色三角
+            # 画 ball，红色三角
             for track_id, ball in ball_dict.items():
                 frame = self.draw_triangle(frame, ball["bbox"], color=(10, 10, 245))
 
@@ -223,13 +223,33 @@ class Tracker:
         df_ball_pos = pd.DataFrame(ball_pos, columns=["x1", "y1", "x2", "y2"])
 
         # 插值并向后填充
-        df_ball_pos = df_ball_pos.interpolate().bfill().ffill()
-        # 确保所有的 NaN 值都被填充
-        df_ball_pos = df_ball_pos.fillna(method="bfill").fillna(method="ffill")
-        df_ball_pos = df_ball_pos.fillna(0)  # 这是一个保险措施，以防还有未被处理的 NaN
-        # 将插值后的数据转换回原始格式
+        df_ball_pos = df_ball_pos.interpolate().bfill()
         ball_positions = [{1: {"bbox": x}} for x in df_ball_pos.to_numpy().tolist()]
 
+        # 平滑
+        pos_list = []
+        for frame in ball_positions:
+            bbox = frame[1]["bbox"]
+            pos = get_center(bbox)
+            pos_list.append((pos,bbox))
+        dist_list = []
+        for i in range(1, len(pos_list)):
+            dist = measure_distance(pos_list[i][0], pos_list[i - 1][0])
+            # print(f'{dist:.2f}')
+            dist_list.append(dist)
+        while max(dist_list) > 73:
+            for i in range(len(dist_list) - 1):
+                if dist_list[i] > 73:
+                    pos_list[i + 1] = pos_list[i]
+                    # 重新计算当前和下一距离
+                    if i + 1 < len(dist_list):
+                        dist_list[i] = measure_distance(pos_list[i][0], pos_list[i + 1][0])
+                    if i + 2 < len(dist_list):
+                        dist_list[i + 1] = measure_distance(pos_list[i + 1][0], pos_list[i + 2][0])
+        # 将pos_list付给ball_positions
+        for i in range(len(ball_positions)):
+            if  measure_distance(pos_list[i][0], get_center(ball_positions[i][1]["bbox"])) > 50:
+                ball_positions[i][1]["bbox"] = pos_list[i][1]
         return ball_positions
 
     def interpolate_ball_plus(self, ball_positions):
@@ -284,19 +304,43 @@ class Tracker:
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
         team_control_till_frame = team_control[: frame_num + 1]
-        team_1 = team_control_till_frame[team_control_till_frame==1].shape[0]
-        team_2 = team_control_till_frame[team_control_till_frame==2].shape[0]
+        team_1 = team_control_till_frame[team_control_till_frame == 1].shape[0]
+        team_2 = team_control_till_frame[team_control_till_frame == 2].shape[0]
         total = team_1 + team_2
         team_1_percent = team_1 / total if total != 0 else 0
         team_2_percent = team_2 / total if total != 0 else 0
 
-        team_1_color = (int(self.team_colors[1][0]), int(self.team_colors[1][1]), int(self.team_colors[1][2]))
+        team_1_color = (
+            int(self.team_colors[1][0]),
+            int(self.team_colors[1][1]),
+            int(self.team_colors[1][2]),
+        )
         cv2.rectangle(frame, (1370, 880), (1390, 900), team_1_color, -1)
-        cv2.putText(frame, f"队 1 控球率: {team_1_percent:.2%}", (1400, 900), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
+        cv2.putText(
+            frame,
+            f"Team 1 Control: {team_1_percent:.2%}",
+            (1400, 900),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 0),
+            3,
+        )
         # frame = self.put_chinese_text(frame, f"队 1 控球率: {team_1_percent:.2%}", (1400, 900), "font/simsunb.ttf", 30, (0, 0, 0))
 
-        team_2_color = (int(self.team_colors[2][0]), int(self.team_colors[2][1]), int(self.team_colors[2][2]))
+        team_2_color = (
+            int(self.team_colors[2][0]),
+            int(self.team_colors[2][1]),
+            int(self.team_colors[2][2]),
+        )
         cv2.rectangle(frame, (1370, 930), (1390, 950), team_2_color, -1)
-        cv2.putText(frame, f"队 2 控球率: {team_2_percent:.2%}", (1400, 950), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
+        cv2.putText(
+            frame,
+            f"Team 2 Control: {team_2_percent:.2%}",
+            (1400, 950),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 0),
+            3,
+        )
         # frame = self.put_chinese_text(frame, f"队 2 控球率: {team_2_percent:.2%}", (1400, 950), "font/simsunb.ttf", 30, (0, 0, 0))
         return frame

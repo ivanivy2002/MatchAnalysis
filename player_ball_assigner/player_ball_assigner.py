@@ -10,11 +10,16 @@ class PlayerBallAssigner:
 
     def assign_ball_2_player(self, players, ball):
         ball = get_center(ball)
-        dist_list = []
+        min_dist = 999999
         for id, player in players.items():
             player_bbox = player["bbox"]
             dist = distance_feet_point(player_bbox, ball)
-            dist_list.append((id, dist))
-        min_id, min_dist = min(dist_list, key=lambda x: x[1])
-        if 0 <= min_dist < self.max_p_b_dist:
+            if dist > self.max_p_b_dist:
+                continue
+            if dist < min_dist:
+                min_dist = dist
+                min_id = id
+        if min_dist < self.max_p_b_dist:
             return min_id
+        else:
+            return None
