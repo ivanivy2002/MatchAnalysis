@@ -1,0 +1,3 @@
+yolov5lu
+yolov5xu
+yolov8n
